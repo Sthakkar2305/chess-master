@@ -1,0 +1,5 @@
+{
+  "name": "Chess Master PWA",
+  "description": "An offline-capable Progressive Web App for playing Chess against a computer or a friend, featuring save/load capabilities.",
+  "requestFramePermissions": []
+}
