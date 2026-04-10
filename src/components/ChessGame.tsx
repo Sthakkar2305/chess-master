@@ -94,7 +94,10 @@ export default function ChessGame() {
         return;
       }
 
-      const gameCopy = new Chess(g.fen());
+      // Clone game properly to preserve history
+      const gameCopy = new Chess();
+      gameCopy.loadPgn(g.pgn());
+      
       try {
         const result = gameCopy.move(bestMove);
         if (result) {
@@ -183,9 +186,20 @@ export default function ChessGame() {
 
     // If we have a piece selected, try to move
     if (moveFrom) {
-      const gameCopy = new Chess(game.fen());
+      // Clone using PGN to preserve history
+      const gameCopy = new Chess();
+      gameCopy.loadPgn(game.pgn());
+      
       try {
-        const move = gameCopy.move({ from: moveFrom, to: square, promotion: 'q' });
+        const sourcePiece = game.get(moveFrom as any);
+        const isPromotion = sourcePiece && sourcePiece.type === 'p' && (square[1] === '8' || square[1] === '1');
+
+        const move = gameCopy.move(
+          isPromotion
+            ? { from: moveFrom, to: square, promotion: 'q' }
+            : { from: moveFrom, to: square }
+        );
+
         if (move) {
           setLastMove({ from: move.from, to: move.to });
           setGame(gameCopy);
@@ -229,9 +243,21 @@ export default function ChessGame() {
     if (mode === 'pvc' && game.turn() === 'b') return false;
     if (isComputerThinking) return false;
 
-    const gameCopy = new Chess(game.fen());
+    // Clone using PGN to preserve history
+    const gameCopy = new Chess();
+    gameCopy.loadPgn(game.pgn());
+
     try {
-      const move = gameCopy.move({ from: sourceSquare, to: targetSquare, promotion: 'q' });
+      // Conditionally apply promotion ONLY if it's a pawn moving to the final rank
+      const piece = game.get(sourceSquare as any);
+      const isPromotion = piece && piece.type === 'p' && (targetSquare[1] === '8' || targetSquare[1] === '1');
+
+      const move = gameCopy.move(
+        isPromotion
+          ? { from: sourceSquare, to: targetSquare, promotion: 'q' }
+          : { from: sourceSquare, to: targetSquare }
+      );
+
       if (!move) return false;
       setLastMove({ from: move.from, to: move.to });
       setGame(gameCopy);
@@ -581,7 +607,6 @@ export default function ChessGame() {
         touchAction: 'none',
       }}>
         <Chessboard
-          id="chess-board"
           position={game.fen()}
           onPieceDrop={onDrop}
           onSquareClick={onSquareClick}
