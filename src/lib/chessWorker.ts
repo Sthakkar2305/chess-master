@@ -1,16 +1,33 @@
 import { Chess } from 'chess.js';
 
-// Piece base values (centipawns)
+let stockfish: Worker | null = null;
+let stockfishResolver: ((move: string) => void) | null = null;
+let currentDepth = 12; // Stockfish depth
+
+try {
+  stockfish = new Worker('/stockfish.js');
+  stockfish.onmessage = (e: MessageEvent) => {
+    const line = e.data;
+    if (typeof line === 'string' && line.startsWith('bestmove') && stockfishResolver) {
+      const match = line.match(/^bestmove\s([a-h][1-8][a-h][1-8][qrbn]?)/);
+      if (match) {
+        stockfishResolver(match[1]);
+        stockfishResolver = null;
+      }
+    }
+  };
+  stockfish.postMessage('uci');
+  stockfish.postMessage('isready');
+} catch (e) {
+  console.warn("Stockfish wrapper setup failed", e);
+}
+
+// Fallback logic
 const PIECE_VALUES: Record<string, number> = {
-  p: 100,
-  n: 320,
-  b: 330,
-  r: 500,
-  q: 900,
-  k: 20000,
+  p: 100, n: 320, b: 330, r: 500, q: 900, k: 20000,
 };
 
-// Piece-square tables for positional evaluation
+// ... (abbreviated tables to save worker space, we'll implement fully below)
 const PAWN_TABLE = [
   [0,  0,  0,  0,  0,  0,  0,  0],
   [50, 50, 50, 50, 50, 50, 50, 50],
@@ -21,7 +38,6 @@ const PAWN_TABLE = [
   [5, 10, 10,-20,-20, 10, 10,  5],
   [0,  0,  0,  0,  0,  0,  0,  0],
 ];
-
 const KNIGHT_TABLE = [
   [-50,-40,-30,-30,-30,-30,-40,-50],
   [-40,-20,  0,  0,  0,  0,-20,-40],
@@ -32,7 +48,6 @@ const KNIGHT_TABLE = [
   [-40,-20,  0,  5,  5,  0,-20,-40],
   [-50,-40,-30,-30,-30,-30,-40,-50],
 ];
-
 const BISHOP_TABLE = [
   [-20,-10,-10,-10,-10,-10,-10,-20],
   [-10,  0,  0,  0,  0,  0,  0,-10],
@@ -43,7 +58,6 @@ const BISHOP_TABLE = [
   [-10,  5,  0,  0,  0,  0,  5,-10],
   [-20,-10,-10,-10,-10,-10,-10,-20],
 ];
-
 const ROOK_TABLE = [
   [0,  0,  0,  0,  0,  0,  0,  0],
   [5, 10, 10, 10, 10, 10, 10,  5],
@@ -54,7 +68,6 @@ const ROOK_TABLE = [
   [-5,  0,  0,  0,  0,  0,  0, -5],
   [0,  0,  0,  5,  5,  0,  0,  0],
 ];
-
 const QUEEN_TABLE = [
   [-20,-10,-10, -5, -5,-10,-10,-20],
   [-10,  0,  0,  0,  0,  0,  0,-10],
@@ -65,7 +78,6 @@ const QUEEN_TABLE = [
   [-10,  0,  5,  0,  0,  0,  0,-10],
   [-20,-10,-10, -5, -5,-10,-10,-20],
 ];
-
 const KING_MIDDLE_TABLE = [
   [-30,-40,-40,-50,-50,-40,-40,-30],
   [-30,-40,-40,-50,-50,-40,-40,-30],
@@ -91,9 +103,7 @@ function getPieceSquareValue(type: string, row: number, col: number, isWhite: bo
 }
 
 function evaluateBoard(game: Chess): number {
-  if (game.isCheckmate()) {
-    return game.turn() === 'w' ? -99999 : 99999;
-  }
+  if (game.isCheckmate()) return game.turn() === 'w' ? -99999 : 99999;
   if (game.isDraw() || game.isStalemate()) return 0;
 
   let score = 0;
@@ -124,16 +134,8 @@ function orderMoves(game: Chess): string[] {
   return scored.map(m => m.san);
 }
 
-function minimax(
-  game: Chess,
-  depth: number,
-  alpha: number,
-  beta: number,
-  maximizing: boolean
-): number {
-  if (depth === 0 || game.isGameOver()) {
-    return evaluateBoard(game);
-  }
+function minimax(game: Chess, depth: number, alpha: number, beta: number, maximizing: boolean): number {
+  if (depth === 0 || game.isGameOver()) return evaluateBoard(game);
 
   const moves = depth >= 2 ? orderMoves(game) : game.moves();
 
@@ -162,30 +164,39 @@ function minimax(
   }
 }
 
-export type Difficulty = 'easy' | 'medium' | 'hard' | 'expert';
-
-export function getBestMove(game: Chess, difficulty: Difficulty): string {
+async function getBestMoveAsync(fen: string, difficulty: 'easy'|'medium'|'hard'|'expert'): Promise<string> {
+  const game = new Chess(fen);
   const moves = game.moves();
   if (moves.length === 0) return '';
 
+  if (difficulty === 'expert') {
+    if (stockfish) {
+      return new Promise<string>((resolve) => {
+        stockfishResolver = (move: string) => resolve(move);
+        stockfish!.postMessage('position fen ' + fen);
+        stockfish!.postMessage('go depth ' + currentDepth);
+      });
+    } else {
+      // fallback if stockfish failed to load
+      difficulty = 'hard';
+    }
+  }
+
   if (difficulty === 'easy') {
-    if (Math.random() < 0.65) {
-      return moves[Math.floor(Math.random() * moves.length)];
-    }
+    if (Math.random() < 0.65) return moves[Math.floor(Math.random() * moves.length)];
     const captures = (game.moves({ verbose: true }) as any[]).filter(m => m.captured);
-    if (captures.length > 0) {
-      return captures[Math.floor(Math.random() * captures.length)].san;
-    }
+    if (captures.length > 0) return captures[Math.floor(Math.random() * captures.length)].san;
     return moves[Math.floor(Math.random() * moves.length)];
   }
 
-  const depth = difficulty === 'medium' ? 2 : difficulty === 'hard' ? 3 : 4;
+  const depth = difficulty === 'medium' ? 2 : 3;
   const isMaximizing = game.turn() === 'w';
-
   const orderedMoves = orderMoves(game);
   let bestMove = orderedMoves[0];
   let bestValue = isMaximizing ? -Infinity : Infinity;
 
+  // We add a tiny delay loop so we don't block immediately if it's very fast, 
+  // though webworkers don't need it. It's just computation.
   for (const move of orderedMoves) {
     game.move(move);
     const value = minimax(game, depth - 1, -Infinity, Infinity, !isMaximizing);
@@ -203,3 +214,11 @@ export function getBestMove(game: Chess, difficulty: Difficulty): string {
 
   return bestMove || moves[0];
 }
+
+self.onmessage = async (e: MessageEvent) => {
+  const { id, fen, difficulty } = e.data;
+  if (!fen || !difficulty) return;
+  
+  const move = await getBestMoveAsync(fen, difficulty);
+  self.postMessage({ id, move });
+};
