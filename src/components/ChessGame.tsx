@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { Chess, Move } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
 import { RotateCcw, User, Cpu, Trophy, AlertCircle, ChevronLeft, Loader2, Undo2, Save, FolderOpen, Wifi } from 'lucide-react';
-import { io, Socket } from 'socket.io-client';
+import Peer, { DataConnection } from 'peerjs';
 
 type GameMode = 'pvp' | 'pvc' | 'p2p';
 type PlayerColor = 'w' | 'b';
@@ -108,7 +108,8 @@ export default function ChessGame() {
   const [phase, setPhase] = useState<GamePhase>('menu');
   const [roomCode, setRoomCode] = useState('');
   const [inRoomCode, setInRoomCode] = useState('');
-  const [socket, setSocket] = useState<Socket | null>(null);
+  const [peer, setPeer] = useState<Peer | null>(null);
+  const [connection, setConnection] = useState<DataConnection | null>(null);
   
   const [gameOverMsg, setGameOverMsg] = useState('');
   const [moveFrom, setMoveFrom] = useState<string>('');
@@ -165,13 +166,10 @@ export default function ChessGame() {
       }
     };
     
-    // Socket.io initialization
-    const s = io(window.location.origin);
-    setSocket(s);
-    
+    // PeerJS initialization & cleanup is handled during matching
     return () => {
       aiWorker?.terminate();
-      s.disconnect();
+      if (peer) peer.destroy();
     };
   }, []);
 
@@ -237,67 +235,95 @@ export default function ChessGame() {
     }
   }, [game, mode, difficulty, phase, computerColor, triggerComputerMove]);
 
-  // Socket.io event handlers
-  useEffect(() => {
-    if (!socket) return;
+  // PeerJS Connection Handler
+  const handleConnection = useCallback((conn: DataConnection, isHost: boolean) => {
+    setConnection(conn);
     
-    socket.on('room_created', (id: string) => {
+    conn.on('open', () => {
+      if (isHost) {
+        setPhase('playing');
+        const newGame = new Chess();
+        setGame(newGame);
+        setGameOverMsg('');
+        setLastMove(null);
+      }
+    });
+
+    conn.on('data', (data: any) => {
+      if (data.type === 'move') {
+        const g = cloneGame(gameRef.current);
+        const res = g.move(data.move);
+        if (res) {
+          setLastMove({ from: res.from, to: res.to });
+          setGame(g);
+          checkGameOver(g);
+        }
+      } else if (data.type === 'restart') {
+        const newGame = new Chess();
+        setGame(newGame);
+        setGameOverMsg('');
+        setLastMove(null);
+        setMoveFrom('');
+        setHighlights({});
+      }
+    });
+
+    conn.on('close', () => {
+      alert('Opponent disconnected');
+      setPhase('menu');
+      setConnection(null);
+    });
+    
+    conn.on('error', (err) => {
+      console.error(err);
+    });
+  }, [checkGameOver]);
+
+  const createRoom = () => {
+    const newRoomId = Math.random().toString(36).substring(2, 6).toUpperCase();
+    const newPeer = new Peer(newRoomId);
+    setPeer(newPeer);
+    
+    newPeer.on('open', (id) => {
       setRoomCode(id);
       setInRoomCode(id);
       setPlayerColor('w'); // Host is white
     });
     
-    socket.on('player_joined', () => {
-      setPhase('playing');
-      const newGame = new Chess();
-      setGame(newGame);
-      setGameOverMsg('');
-      setLastMove(null);
+    newPeer.on('connection', (conn) => {
+      handleConnection(conn, true);
     });
-    
-    socket.on('room_joined', (id: string) => {
-      setInRoomCode(id);
-      setPlayerColor('b'); // Joiner is black
-      setPhase('playing');
-      const newGame = new Chess();
-      setGame(newGame);
-      setGameOverMsg('');
-      setLastMove(null);
-    });
-    
-    socket.on('room_error', (msg: string) => {
-      alert(msg);
+
+    newPeer.on('error', (err) => {
+      alert('Error creating room. It may be in use: ' + err.message);
       setPhase('menu');
     });
+  };
 
-    socket.on('move_made', (moveSan: string) => {
-      const g = cloneGame(gameRef.current);
-      const res = g.move(moveSan);
-      if (res) {
-        setLastMove({ from: res.from, to: res.to });
-        setGame(g);
-        checkGameOver(g);
-      }
+  const joinRoom = (roomId: string) => {
+    if (!roomId) return;
+    const newPeer = new Peer();
+    setPeer(newPeer);
+    
+    newPeer.on('open', () => {
+      const conn = newPeer.connect(roomId);
+      conn.on('open', () => {
+        setInRoomCode(roomId);
+        setPlayerColor('b'); // Joiner is black
+        setPhase('playing');
+        const newGame = new Chess();
+        setGame(newGame);
+        setGameOverMsg('');
+        setLastMove(null);
+      });
+      handleConnection(conn, false);
     });
 
-    socket.on('game_restarted', () => {
-      const newGame = new Chess();
-      setGame(newGame);
-      setGameOverMsg('');
-      setLastMove(null);
-      setMoveFrom('');
-      setHighlights({});
+    newPeer.on('error', (err) => {
+      alert('Error joining room: ' + err.message);
+      setPhase('menu');
     });
-
-    return () => {
-      socket.off('room_created');
-      socket.off('player_joined');
-      socket.off('room_joined');
-      socket.off('room_error');
-      socket.off('move_made');
-      socket.off('game_restarted');
-    };
-  }, [socket, checkGameOver]);
+  };
 
   function getMoveHighlights(square: string, currentGame: Chess): MoveHighlights | null {
     const moves = currentGame.moves({ square: square as any, verbose: true }) as any[];
@@ -336,8 +362,8 @@ export default function ChessGame() {
       setHighlights({ [move.from]: { background: 'rgba(100, 200, 100, 0.35)' }, [move.to]: { background: 'rgba(100, 200, 100, 0.5)' } });
       checkGameOver(gameCopy);
       
-      if (mode === 'p2p' && socket) {
-        socket.emit('move', { roomId: inRoomCode, move: move.san });
+      if (mode === 'p2p' && connection) {
+        connection.send({ type: 'move', move: move.san });
       }
       return true;
     } catch {
@@ -422,8 +448,8 @@ export default function ChessGame() {
 
   function restartGame() {
     setIsComputerThinking(false);
-    if (mode === 'p2p' && socket) {
-      socket.emit('restart', { roomId: inRoomCode });
+    if (mode === 'p2p' && connection) {
+      connection.send({ type: 'restart' });
     }
     const newGame = new Chess();
     setGame(newGame);
@@ -496,7 +522,7 @@ export default function ChessGame() {
           
           <div style={{ marginBottom: '24px', textAlign: 'center' }}>
             <p style={{ color: '#aaa', fontSize: '14px', marginBottom: '12px' }}>Hotspot/LAN Room Options:</p>
-            <button onClick={() => socket?.emit('create_room')}
+            <button onClick={createRoom}
               style={{ width: '100%', padding: '14px', background: '#d0a85f', color: '#000', fontWeight: 'bold', fontSize: '16px', borderRadius: '8px', border: 'none', cursor: 'pointer', marginBottom: '12px' }}>
               Create Host Room
             </button>
@@ -511,7 +537,7 @@ export default function ChessGame() {
           <div style={{ borderTop: '1px solid #444', paddingTop: '24px' }}>
             <input type="text" placeholder="Enter Room Code" value={inRoomCode} onChange={(e)=>setInRoomCode(e.target.value.toUpperCase())}
               style={{ width: '100%', padding: '12px', background: '#111', color: '#fff', border: '1px solid #666', borderRadius: '8px', marginBottom: '12px', fontSize: '16px', textAlign: 'center', boxSizing: 'border-box' }}/>
-            <button onClick={() => socket?.emit('join_room', inRoomCode)}
+            <button onClick={() => joinRoom(inRoomCode)}
               style={{ width: '100%', padding: '14px', background: 'rgba(255,255,255,0.1)', color: '#fff', fontWeight: 'bold', fontSize: '16px', borderRadius: '8px', border: '1px solid #666', cursor: 'pointer' }}>
               Join Exisiting Room
             </button>
