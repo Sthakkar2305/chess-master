@@ -8,6 +8,7 @@ type GameMode = 'pvp' | 'pvc' | 'p2p';
 type PlayerColor = 'w' | 'b';
 type GamePhase = 'menu' | 'playing' | 'matching';
 type Difficulty = 'easy' | 'medium' | 'hard' | 'expert';
+type TimeMode = 'none' | '5' | '10';
 
 interface MoveHighlights {
   [square: string]: React.CSSProperties;
@@ -20,6 +21,9 @@ interface SavedGame {
   playerColor: PlayerColor;
   undoLeft: number;
   savedAt: string;
+  timeMode?: TimeMode;
+  whiteTime?: number;
+  blackTime?: number;
 }
 
 const SAVE_KEY = 'chess-master-saved-game-v2';
@@ -65,7 +69,7 @@ function getCapturedPieces(game: Chess): Record<PlayerColor, string[]> {
   return captured;
 }
 
-function CapturedTray({ color, pieces, label }: { color: PlayerColor; pieces: string[]; label: string; }) {
+function CapturedTray({ color, pieces, label, timeStr, isActive }: { color: PlayerColor; pieces: string[]; label: string; timeStr?: string; isActive?: boolean }) {
   return (
     <div style={{
       width: 'calc(100% - 28px)', maxWidth: '632px', minHeight: '42px',
@@ -74,9 +78,16 @@ function CapturedTray({ color, pieces, label }: { color: PlayerColor; pieces: st
       border: '2px solid rgba(139, 90, 43, 0.3)', borderRadius: '6px',
       boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.5)', marginBottom: '4px', marginTop: '4px',
     }}>
-      <span style={{ color: '#d9a066', fontSize: '12px', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>
-        {label}
-      </span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        <span style={{ color: '#d9a066', fontSize: '12px', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>
+          {label}
+        </span>
+        {timeStr && (
+          <span style={{ background: isActive ? '#4a3320' : '#111', padding: '4px 8px', borderRadius: '4px', color: isActive ? '#ead7ae' : '#888', fontSize: '16px', fontWeight: 'bold', border: isActive ? '1px solid #d0a85f' : '1px solid #444', fontVariantNumeric: 'tabular-nums' }}>
+            {timeStr}
+          </span>
+        )}
+      </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', gap: '3px', minHeight: '22px' }}>
         {pieces.length === 0 ? (
           <span style={{ color: 'rgba(217,160,102,0.4)', fontSize: '11px', fontWeight: 600 }}>None</span>
@@ -119,8 +130,15 @@ export default function ChessGame() {
   const [boardSize, setBoardSize] = useState(480);
   const [undoLeft, setUndoLeft] = useState(MAX_UNDOS);
   const [savedAt, setSavedAt] = useState<string>('');
+  
+  const [timeMode, setTimeMode] = useState<TimeMode>('none');
+  const [whiteTime, setWhiteTime] = useState<number>(0);
+  const [blackTime, setBlackTime] = useState<number>(0);
+
   const gameRef = useRef(game);
   gameRef.current = game;
+  const timeModeRef = useRef(timeMode);
+  timeModeRef.current = timeMode;
 
   const computerColor: PlayerColor = playerColor === 'w' ? 'b' : 'w';
   const topColor: PlayerColor = playerColor === 'w' ? 'b' : 'w';
@@ -147,6 +165,38 @@ export default function ChessGame() {
     window.addEventListener('resize', updateSize, { passive: true });
     return () => window.removeEventListener('resize', updateSize);
   }, []);
+
+  useEffect(() => {
+    if (phase !== 'playing' || timeMode === 'none' || game.isGameOver() || gameOverMsg) return;
+    
+    const interval = setInterval(() => {
+      if (game.turn() === 'w') {
+        setWhiteTime(t => {
+          if (t <= 1) {
+            setGameOverMsg('Time out. Black wins.');
+            return 0;
+          }
+          return t - 1;
+        });
+      } else {
+        setBlackTime(t => {
+          if (t <= 1) {
+            setGameOverMsg('Time out. White wins.');
+            return 0;
+          }
+          return t - 1;
+        });
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [phase, timeMode, game, gameOverMsg]);
+
+  function formatTime(seconds: number) {
+    if (timeMode === 'none') return '';
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  }
 
   useEffect(() => {
     try {
@@ -235,7 +285,6 @@ export default function ChessGame() {
     }
   }, [game, mode, difficulty, phase, computerColor, triggerComputerMove]);
 
-  // PeerJS Connection Handler
   const handleConnection = useCallback((conn: DataConnection, isHost: boolean) => {
     setConnection(conn);
     
@@ -246,6 +295,9 @@ export default function ChessGame() {
         setGame(newGame);
         setGameOverMsg('');
         setLastMove(null);
+        setTimeout(() => {
+          conn.send({ type: 'config', timeMode: timeModeRef.current });
+        }, 500);
       }
     });
 
@@ -259,12 +311,25 @@ export default function ChessGame() {
           checkGameOver(g);
         }
       } else if (data.type === 'restart') {
+        if (data.timeMode) {
+          setTimeMode(data.timeMode);
+          const initialTime = data.timeMode === 'none' ? 0 : parseInt(data.timeMode) * 60;
+          setWhiteTime(initialTime);
+          setBlackTime(initialTime);
+        }
         const newGame = new Chess();
         setGame(newGame);
         setGameOverMsg('');
         setLastMove(null);
         setMoveFrom('');
         setHighlights({});
+      } else if (data.type === 'config') {
+        if (data.timeMode) {
+          setTimeMode(data.timeMode);
+          const initialTime = data.timeMode === 'none' ? 0 : parseInt(data.timeMode) * 60;
+          setWhiteTime(initialTime);
+          setBlackTime(initialTime);
+        }
       }
     });
 
@@ -372,7 +437,7 @@ export default function ChessGame() {
   }
 
   function onSquareClick(square: string) {
-    if (game.isGameOver() || !isHumanTurn(game) || isComputerThinking) return;
+    if (game.isGameOver() || !isHumanTurn(game) || isComputerThinking || gameOverMsg) return;
     const piece = game.get(square as any);
 
     if (piece && piece.color === game.turn()) {
@@ -406,7 +471,7 @@ export default function ChessGame() {
   }
 
   function onPieceDragBegin(_piece: string, sourceSquare: string) {
-    if (game.isGameOver() || !isHumanTurn(game) || isComputerThinking) return;
+    if (game.isGameOver() || !isHumanTurn(game) || isComputerThinking || gameOverMsg) return;
     const h = getMoveHighlights(sourceSquare, game);
     if (h) {
       setMoveFrom(sourceSquare);
@@ -415,7 +480,7 @@ export default function ChessGame() {
   }
 
   function onDrop(sourceSquare: string, targetSquare: string): boolean {
-    if (game.isGameOver() || !isHumanTurn(game) || isComputerThinking) return false;
+    if (game.isGameOver() || !isHumanTurn(game) || isComputerThinking || gameOverMsg) return false;
     const piece = game.get(sourceSquare as any);
     const isPromotion = piece && piece.type === 'p' && (targetSquare[1] === '8' || targetSquare[1] === '1');
     const success = applyMove(sourceSquare, targetSquare, !!isPromotion);
@@ -435,6 +500,10 @@ export default function ChessGame() {
       setPhase('matching');
       return;
     }
+    const initialTime = timeMode === 'none' ? 0 : parseInt(timeMode) * 60;
+    setWhiteTime(initialTime);
+    setBlackTime(initialTime);
+
     setIsComputerThinking(false);
     const newGame = new Chess();
     setGame(newGame);
@@ -447,9 +516,13 @@ export default function ChessGame() {
   }
 
   function restartGame() {
+    const initialTime = timeMode === 'none' ? 0 : parseInt(timeMode) * 60;
+    setWhiteTime(initialTime);
+    setBlackTime(initialTime);
+
     setIsComputerThinking(false);
     if (mode === 'p2p' && connection) {
-      connection.send({ type: 'restart' });
+      connection.send({ type: 'restart', timeMode });
     }
     const newGame = new Chess();
     setGame(newGame);
@@ -480,6 +553,7 @@ export default function ChessGame() {
   function saveGame() {
     const payload: SavedGame = {
       pgn: game.pgn(), mode, difficulty, playerColor, undoLeft, savedAt: new Date().toISOString(),
+      timeMode, whiteTime, blackTime,
     };
     localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
     setSavedAt(payload.savedAt);
@@ -496,6 +570,12 @@ export default function ChessGame() {
       setDifficulty(saved.difficulty || 'medium');
       setPlayerColor(saved.playerColor || 'w');
       setUndoLeft(Number.isFinite(saved.undoLeft) ? saved.undoLeft : MAX_UNDOS);
+      
+      const savedTimeMode = saved.timeMode || 'none';
+      setTimeMode(savedTimeMode);
+      setWhiteTime(saved.whiteTime ?? (savedTimeMode === 'none' ? 0 : parseInt(savedTimeMode) * 60));
+      setBlackTime(saved.blackTime ?? (savedTimeMode === 'none' ? 0 : parseInt(savedTimeMode) * 60));
+
       setGame(loaded);
       setLastMove(getLastMove(loaded));
       setMoveFrom('');
@@ -577,6 +657,23 @@ export default function ChessGame() {
             </div>
           </div>
 
+          <div style={{ marginBottom: '24px' }}>
+            <label style={{ color: 'rgba(255,255,255,0.6)', fontSize: '12px', fontWeight: '700', letterSpacing: '0.1em', textTransform: 'uppercase', display: 'block', marginBottom: '10px' }}>Time Mode</label>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
+              {(['none', '5', '10'] as TimeMode[]).map(t => (
+                <button key={t} onClick={() => setTimeMode(t)}
+                  style={{
+                    padding: '10px 8px', borderRadius: '8px', border: 'none', cursor: 'pointer',
+                    fontWeight: '600', fontSize: '13px', textTransform: 'capitalize', transition: 'all 0.2s',
+                    background: timeMode === t ? '#d0a85f' : 'rgba(255,255,255,0.08)',
+                    color: timeMode === t ? '#24160d' : 'rgba(255,255,255,0.6)',
+                  }}>
+                  {t === 'none' ? 'No Time' : `${t} Min`}
+                </button>
+              ))}
+            </div>
+          </div>
+
           {mode === 'pvc' && (
             <div style={{ marginBottom: '24px' }}>
               <label style={{ color: 'rgba(255,255,255,0.6)', fontSize: '12px', fontWeight: '700', letterSpacing: '0.1em', textTransform: 'uppercase', display: 'block', marginBottom: '10px' }}>Choose Your Side</label>
@@ -634,9 +731,13 @@ export default function ChessGame() {
   return (
     <div style={{ minHeight: '100dvh', background: '#1c130d', display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: 'Georgia, Cambria, serif', userSelect: 'none' }}>
       <header style={{ width: '100%', background: 'rgba(0,0,0,0.6)', borderBottom: '1px solid rgba(255,255,255,0.05)', padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', boxSizing: 'border-box' }}>
-        <button onClick={() => setPhase('menu')} style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'transparent', border: 'none', color: '#aaa', cursor: 'pointer', fontSize: '14px', fontWeight: '600' }}><ChevronLeft size={16} /> Menu</button>
+        <button onClick={() => setPhase('menu')} style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'transparent', border: 'none', color: '#aaa', cursor: 'pointer', fontSize: '14px', fontWeight: '600', width: '80px', justifyContent: 'flex-start' }}><ChevronLeft size={16} /> Menu</button>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Trophy size={18} color="#d0a85f" /><span style={{ color: '#fff', fontWeight: '700', fontSize: '16px' }}>Chess Master</span></div>
-        <button onClick={restartGame} style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'transparent', border: 'none', color: '#fca5a5', cursor: 'pointer', fontSize: '14px', fontWeight: '600' }}><RotateCcw size={14} /> Restart</button>
+        <div style={{ width: '80px', display: 'flex', justifyContent: 'flex-end' }}>
+          {mode === 'pvc' && (
+            <button onClick={restartGame} style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'transparent', border: 'none', color: '#fca5a5', cursor: 'pointer', fontSize: '14px', fontWeight: '600' }}><RotateCcw size={14} /> Restart</button>
+          )}
+        </div>
       </header>
 
       <div style={{ width: '100%', maxWidth: `${boardSize + 32}px`, padding: '10px 16px', boxSizing: 'border-box' }}>
@@ -664,7 +765,13 @@ export default function ChessGame() {
         )}
       </div>
 
-      <CapturedTray color={topColor} pieces={capturedPieces[topColor]} label={`${topColor === 'w' ? 'White' : 'Black'} Has Lost`} />
+      <CapturedTray 
+        color={topColor} 
+        pieces={capturedPieces[topColor]} 
+        label={`${topColor === 'w' ? 'White' : 'Black'} Has Lost`} 
+        timeStr={formatTime(topColor === 'w' ? whiteTime : blackTime)} 
+        isActive={game.turn() === topColor && !gameOverMsg} 
+      />
 
       <div style={{
         width: `${boardSize}px`, height: `${boardSize}px`, borderRadius: '6px', overflow: 'hidden',
@@ -688,7 +795,13 @@ export default function ChessGame() {
         />
       </div>
 
-      <CapturedTray color={bottomColor} pieces={capturedPieces[bottomColor]} label={`${bottomColor === 'w' ? 'White' : 'Black'} Has Lost`} />
+      <CapturedTray 
+        color={bottomColor} 
+        pieces={capturedPieces[bottomColor]} 
+        label={`${bottomColor === 'w' ? 'White' : 'Black'} Has Lost`} 
+        timeStr={formatTime(bottomColor === 'w' ? whiteTime : blackTime)} 
+        isActive={game.turn() === bottomColor && !gameOverMsg} 
+      />
 
       <div style={{ width: '100%', maxWidth: `${boardSize + 32}px`, padding: '12px 16px', boxSizing: 'border-box', display: 'grid', gridTemplateColumns: mode === 'pvc' ? '1fr 1fr' : '1fr', gap: '10px' }}>
         {mode === 'pvc' && (
